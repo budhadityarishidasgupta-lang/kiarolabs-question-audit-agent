@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from src.audit_agent.reporting import should_fail
@@ -9,7 +10,7 @@ from src.audit_agent.runner import AuditRunner
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the question accuracy audit agent.")
-    parser.add_argument("--mode", choices=["local", "github", "db", "db-migration-check"], required=True)
+    parser.add_argument("--mode", choices=["local", "github", "db", "db-migration-check", "migrate"], required=True)
     parser.add_argument(
         "--config",
         default="config/audit_targets.json",
@@ -33,8 +34,76 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run_safe_migration(cursor):
+    queries = [
+        """
+        ALTER TABLE public.attempts
+        ADD COLUMN IF NOT EXISTS question_id UUID,
+        ADD COLUMN IF NOT EXISTS session_id UUID,
+        ADD COLUMN IF NOT EXISTS time_taken_ms INTEGER,
+        ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS contract_version VARCHAR(10);
+        """,
+        """
+        ALTER TABLE public.spelling_attempts
+        ADD COLUMN IF NOT EXISTS lesson_id INTEGER,
+        ADD COLUMN IF NOT EXISTS question_id UUID,
+        ADD COLUMN IF NOT EXISTS session_id UUID,
+        ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS contract_version VARCHAR(10);
+        """,
+        """
+        CREATE OR REPLACE VIEW public.spelling_words_contract AS
+        SELECT
+            sw.word_id AS id,
+            sw.word,
+            sw.level AS difficulty,
+            sw.hint AS pattern_hint,
+            sw.pattern,
+            sw.example_sentence AS sample_sentence,
+            sw.course_id,
+            sw.lesson_name,
+            NULL::TEXT AS missing_letter_mask
+        FROM public.spelling_words sw;
+        """
+    ]
+
+    results = []
+
+    for query in queries:
+        try:
+            cursor.execute(query)
+            results.append("SUCCESS")
+        except Exception as exc:
+            results.append(str(exc))
+
+    return results
+
+
 def main() -> int:
     args = parse_args()
+    if args.mode == "migrate":
+        try:
+            import psycopg2
+
+            db_url = os.getenv("AUDIT_DB_URL") or os.getenv("DATABASE_URL")
+            if not db_url:
+                raise ValueError("AUDIT_DB_URL is not set")
+
+            conn = psycopg2.connect(db_url)
+            try:
+                with conn.cursor() as cursor:
+                    migration_result = run_safe_migration(cursor)
+                conn.commit()
+            finally:
+                conn.close()
+
+            print({"migration_result": migration_result})
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
     if args.mode in {"db", "db-migration-check"}:
         try:
             from src.audit_agent.db_runner import DBAuditRunner
