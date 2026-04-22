@@ -9,12 +9,7 @@ from src.audit_agent.runner import AuditRunner
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the question accuracy audit agent.")
-    parser.add_argument(
-        "--mode",
-        default="",
-        choices=["", "local", "github", "db"],
-        help="Audit mode override. Use db for read-only Postgres inspection.",
-    )
+    parser.add_argument("--mode", choices=["local", "github", "db"], required=True)
     parser.add_argument(
         "--config",
         default="config/audit_targets.json",
@@ -40,12 +35,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.mode == "db":
+        try:
+            from src.audit_agent.db_runner import DBAuditRunner
+
+            runner = DBAuditRunner()
+            results = runner.run_audit()
+            print(results)
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
     config_default = "config/db_audit_checks.json" if args.mode == "db" else args.config
     config_path = Path(config_default).resolve()
     runner = AuditRunner(
         config_path=config_path,
         dry_run=args.dry_run,
-        mode=args.mode or None,
+        mode=args.mode,
         db_env_var=args.db_env_var,
     )
 
@@ -54,12 +61,6 @@ def main() -> int:
     except Exception as exc:
         print(f"Audit failed: {exc}")
         return 1
-
-    if args.mode == "db":
-        print("Database audit complete")
-        print(f"Clearance: {result.overall_clearance.value}")
-        print("Reports: reports/db-audit-latest.md, reports/db-audit-latest.json")
-        return 0
 
     print(f"Audit complete: {result.metadata.audit_name}")
     print(f"Mode: {result.metadata.mode}")
