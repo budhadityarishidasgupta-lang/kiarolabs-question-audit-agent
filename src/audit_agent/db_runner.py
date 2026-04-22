@@ -5,18 +5,18 @@ from psycopg2.extras import RealDictCursor
 
 class DBAuditRunner:
     MIGRATION_TARGETS = {
-        "attempts": {
-            "question_id": "uuid",
-            "session_id": "uuid",
-            "time_taken_ms": "integer",
-            "contract_version": "character varying",
-        },
-        "spelling_attempts": {
-            "lesson_id": "integer",
-            "question_id": "uuid",
-            "session_id": "uuid",
-            "contract_version": "character varying",
-        },
+        "attempts": [
+            "question_id",
+            "session_id",
+            "time_taken_ms",
+            "contract_version",
+        ],
+        "spelling_attempts": [
+            "lesson_id",
+            "question_id",
+            "session_id",
+            "contract_version",
+        ],
     }
 
     def __init__(self):
@@ -36,16 +36,31 @@ class DBAuditRunner:
                 except Exception:
                     return []
 
-    def _get_columns_with_types(self, table_name):
+    def _get_columns(self, table_name):
         rows = self.run_query(f"""
-            SELECT column_name, data_type
+            SELECT column_name
             FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = '{table_name}'
         """)
+        return {row["column_name"] for row in rows}
+
+    def _table_exists(self, table_name):
+        rows = self.run_query(f"""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = '{table_name}'
+            ) AS exists
+        """)
+        return bool(rows[0]["exists"]) if rows else False
+
+    def check_columns(self, table_name, expected_columns):
+        existing_columns = self._get_columns(table_name)
         return {
-            row["column_name"]: row["data_type"]
-            for row in rows
+            column_name: "EXISTS" if column_name in existing_columns else "MISSING"
+            for column_name in expected_columns
         }
 
     def run_audit(self):
@@ -84,37 +99,33 @@ class DBAuditRunner:
 
     def run_migration_check(self):
         results = {}
-        has_missing = False
-        has_conflict = False
-        all_skip = True
+        any_exists = False
+        all_missing = True
+        blocked = False
 
         for table_name, expected_columns in self.MIGRATION_TARGETS.items():
-            existing_columns = self._get_columns_with_types(table_name)
-            table_results = {}
+            if not self._table_exists(table_name):
+                blocked = True
+                results[table_name] = {
+                    column_name: "MISSING"
+                    for column_name in expected_columns
+                }
+                continue
 
-            for column_name, expected_type in expected_columns.items():
-                if column_name not in existing_columns:
-                    table_results[column_name] = "MISSING"
-                    has_missing = True
-                    all_skip = False
-                    continue
-
-                actual_type = str(existing_columns[column_name]).lower()
-                if actual_type == expected_type:
-                    table_results[column_name] = "SKIP"
-                else:
-                    table_results[column_name] = "CONFLICT"
-                    has_conflict = True
-                    all_skip = False
-
+            table_results = self.check_columns(table_name, expected_columns)
             results[table_name] = table_results
 
-        if has_conflict:
-            results["decision"] = "CONFLICT"
-        elif all_skip:
-            results["decision"] = "SKIP"
-        elif has_missing:
+            if any(status == "EXISTS" for status in table_results.values()):
+                any_exists = True
+            if any(status != "MISSING" for status in table_results.values()):
+                all_missing = False
+
+        if blocked:
+            results["decision"] = "BLOCK"
+        elif all_missing:
             results["decision"] = "SAFE_TO_ADD"
+        elif any_exists:
+            results["decision"] = "PARTIAL"
         else:
             results["decision"] = "SAFE_TO_ADD"
 
