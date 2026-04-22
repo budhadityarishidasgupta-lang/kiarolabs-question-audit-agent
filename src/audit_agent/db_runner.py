@@ -3,6 +3,11 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 
+def check_connection(cursor):
+    cursor.execute("SELECT current_database(), current_user, inet_server_addr();")
+    return cursor.fetchall()
+
+
 class DBAuditRunner:
     MIGRATION_TARGETS = {
         "attempts": [
@@ -65,6 +70,10 @@ class DBAuditRunner:
 
     def run_audit(self):
         results = {}
+
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                results["connection_info"] = check_connection(cursor)
 
         # 1. Table counts
         results["table_counts"] = {
