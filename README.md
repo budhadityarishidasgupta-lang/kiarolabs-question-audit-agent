@@ -27,11 +27,16 @@ Version `0.2.0` moves the scaffold closer to a real audit agent:
 ## Requirements
 
 - Python `3.11+`
-- No third-party Python packages are required in the current implementation
+- No third-party Python packages are required for non-DB modes
+
+Optional for DB mode:
+
+- `psycopg` or `psycopg2`
 
 Optional:
 
 - `GITHUB_TOKEN` for GitHub mode
+- `AUDIT_DB_URL` for DB audit mode
 
 ## Project Layout
 
@@ -120,6 +125,40 @@ Fail CI for serious findings:
 python main.py --config config/audit_targets.github.json --fail-on critical,high
 ```
 
+### DB Mode
+
+Runs a read-only Postgres schema and readiness audit against the configured database.
+
+Set the connection string:
+
+```bash
+AUDIT_DB_URL=postgresql://user:password@host:5432/dbname
+```
+
+Run:
+
+```bash
+python main.py --mode db
+```
+
+Use a different environment variable name if needed:
+
+```bash
+python main.py --mode db --db-env-var MY_AUDIT_DB_URL
+```
+
+Outputs:
+
+- `reports/db-audit-latest.md`
+- `reports/db-audit-latest.json`
+
+DB mode is inspection only:
+
+- it does not run migrations
+- it does not alter schema
+- it does not insert, update, or delete rows
+- it fails safely if the configured DB environment variable is missing
+
 ## Config Schema
 
 Top-level config fields:
@@ -174,6 +213,11 @@ Each run writes:
 - `reports/latest-report.json`
 - `reports/<audit_name>.md`
 - `reports/<audit_name>.json`
+
+DB mode additionally writes:
+
+- `reports/db-audit-latest.md`
+- `reports/db-audit-latest.json`
 
 Each report includes:
 
@@ -241,9 +285,10 @@ This is still a code-and-structure audit, not a runtime certifier.
 It does not yet:
 
 - parse ASTs for Python or TypeScript
-- read live DB schemas
 - replay API fixtures against staging
 - analyze Git diffs or PR deltas
 - post PR comments automatically
+
+It can now perform a read-only Postgres readiness audit in DB mode, but it still does not execute migrations or recommend destructive changes.
 
 Those are the best next upgrades once the GitHub-driven contract audit is stable.

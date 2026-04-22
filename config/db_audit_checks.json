@@ -1,0 +1,44 @@
+{
+  "checks": {
+    "attempts_columns": [
+      "question_id",
+      "session_id",
+      "time_taken_ms",
+      "submitted_at",
+      "contract_version"
+    ],
+    "spelling_attempts_columns": [
+      "lesson_id",
+      "question_id",
+      "session_id",
+      "submitted_at",
+      "contract_version"
+    ],
+    "required_view": [
+      "public",
+      "spelling_words_contract"
+    ],
+    "row_count_tables": [
+      ["public", "attempts"],
+      ["public", "words_attempts"],
+      ["public", "spelling_attempts"]
+    ],
+    "sample_tables": [
+      ["public", "spelling_words"],
+      ["public", "spelling_lessons"]
+    ],
+    "expected_spelling_words_columns": [
+      "word_id",
+      "word",
+      "level",
+      "hint",
+      "pattern",
+      "example_sentence",
+      "course_id",
+      "lesson_name"
+    ],
+    "expected_spelling_lessons_columns": [
+      "lesson_name"
+    ]
+  }
+}
