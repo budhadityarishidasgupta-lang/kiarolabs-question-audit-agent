@@ -9,7 +9,7 @@ from src.audit_agent.runner import AuditRunner
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the question accuracy audit agent.")
-    parser.add_argument("--mode", choices=["local", "github", "db"], required=True)
+    parser.add_argument("--mode", choices=["local", "github", "db", "db-migration-check"], required=True)
     parser.add_argument(
         "--config",
         default="config/audit_targets.json",
@@ -35,12 +35,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.mode == "db":
+    if args.mode in {"db", "db-migration-check"}:
         try:
             from src.audit_agent.db_runner import DBAuditRunner
 
             runner = DBAuditRunner()
-            results = runner.run_audit()
+            if args.mode == "db":
+                results = runner.run_audit()
+            else:
+                results = runner.run_migration_check()
             print(results)
             return 0
         except Exception as exc:
