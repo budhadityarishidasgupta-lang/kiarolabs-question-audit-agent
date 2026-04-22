@@ -22,7 +22,7 @@ jobs:
 
       - name: Run DB Audit Agent
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
         run: |
           echo "Running DB Audit..."
           python main.py --mode migrate
