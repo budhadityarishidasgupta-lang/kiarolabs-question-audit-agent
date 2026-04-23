@@ -25,7 +25,7 @@ jobs:
           DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
         run: |
           echo "Running DB Audit..."
-          python main.py --mode migrate
+          python main.py --mode db
 
       - name: Upload audit result (optional)
         if: always()
