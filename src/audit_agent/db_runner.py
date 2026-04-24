@@ -23,6 +23,18 @@ class DBAuditRunner:
             "contract_version",
         ],
     }
+    MATH_MIGRATION_TARGETS = {
+        "math_attempts": [
+            "session_id",
+            "submitted_at",
+            "contract_version",
+        ],
+        "math_submission_attempts": [
+            "session_id",
+            "submitted_at",
+            "contract_version",
+        ],
+    }
 
     def __init__(self):
         self.db_url = os.getenv("AUDIT_DB_URL")
@@ -68,6 +80,40 @@ class DBAuditRunner:
             for column_name in expected_columns
         }
 
+    def _build_migration_check(self, targets):
+        results = {}
+        any_exists = False
+        all_missing = True
+        blocked = False
+
+        for table_name, expected_columns in targets.items():
+            if not self._table_exists(table_name):
+                blocked = True
+                results[table_name] = {
+                    column_name: "MISSING"
+                    for column_name in expected_columns
+                }
+                continue
+
+            table_results = self.check_columns(table_name, expected_columns)
+            results[table_name] = table_results
+
+            if any(status == "EXISTS" for status in table_results.values()):
+                any_exists = True
+            if any(status != "MISSING" for status in table_results.values()):
+                all_missing = False
+
+        if blocked:
+            results["decision"] = "BLOCK"
+        elif all_missing:
+            results["decision"] = "SAFE_TO_ADD"
+        elif any_exists:
+            results["decision"] = "PARTIAL"
+        else:
+            results["decision"] = "SAFE_TO_ADD"
+
+        return results
+
     def run_audit(self):
         results = {}
 
@@ -107,35 +153,68 @@ class DBAuditRunner:
         return results
 
     def run_migration_check(self):
+        return self._build_migration_check(self.MIGRATION_TARGETS)
+
+    def run_math_audit(self):
         results = {}
-        any_exists = False
-        all_missing = True
-        blocked = False
 
-        for table_name, expected_columns in self.MIGRATION_TARGETS.items():
-            if not self._table_exists(table_name):
-                blocked = True
-                results[table_name] = {
-                    column_name: "MISSING"
-                    for column_name in expected_columns
-                }
-                continue
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                results["connection_info"] = check_connection(cursor)
 
-            table_results = self.check_columns(table_name, expected_columns)
-            results[table_name] = table_results
+        tables = [
+            "math_attempts",
+            "math_submission_attempts",
+            "math_questions",
+            "math_test_papers",
+            "math_printable_papers",
+            "math_printable_questions",
+            "math_printable_answer_keys",
+        ]
 
-            if any(status == "EXISTS" for status in table_results.values()):
-                any_exists = True
-            if any(status != "MISSING" for status in table_results.values()):
-                all_missing = False
+        results["tables"] = {
+            table_name: self._table_exists(table_name)
+            for table_name in tables
+        }
+        results["table_counts"] = {
+            table_name: self.run_query(f"SELECT COUNT(*) AS count FROM public.{table_name};")
+            for table_name in ("math_attempts", "math_submission_attempts")
+            if results["tables"].get(table_name)
+        }
+        results["math_attempts_columns"] = self.run_query("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'math_attempts'
+            ORDER BY ordinal_position
+        """)
+        results["math_submission_attempts_columns"] = self.run_query("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'math_submission_attempts'
+            ORDER BY ordinal_position
+        """)
+        results["sample_math_attempts"] = self.run_query("""
+            SELECT * FROM public.math_attempts ORDER BY created_at DESC LIMIT 5;
+        """) if results["tables"].get("math_attempts") else []
+        results["sample_math_submission_attempts"] = self.run_query("""
+            SELECT * FROM public.math_submission_attempts ORDER BY created_at DESC LIMIT 5;
+        """) if results["tables"].get("math_submission_attempts") else []
+        results["sample_math_questions"] = self.run_query("""
+            SELECT * FROM public.math_questions LIMIT 5;
+        """) if results["tables"].get("math_questions") else []
+        results["sample_math_test_papers"] = self.run_query("""
+            SELECT * FROM public.math_test_papers LIMIT 5;
+        """) if results["tables"].get("math_test_papers") else []
 
-        if blocked:
-            results["decision"] = "BLOCK"
-        elif all_missing:
-            results["decision"] = "SAFE_TO_ADD"
-        elif any_exists:
-            results["decision"] = "PARTIAL"
+        required_tables = {"math_attempts", "math_submission_attempts", "math_questions"}
+        if all(results["tables"].get(table_name) for table_name in required_tables):
+            results["decision"] = "READY_FOR_MATH_MIGRATION_AUDIT"
         else:
-            results["decision"] = "SAFE_TO_ADD"
+            results["decision"] = "BLOCK"
 
         return results
+
+    def run_math_migration_check(self):
+        return self._build_migration_check(self.MATH_MIGRATION_TARGETS)

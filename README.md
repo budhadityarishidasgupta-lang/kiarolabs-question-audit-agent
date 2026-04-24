@@ -141,6 +141,18 @@ Run:
 python main.py --mode db
 ```
 
+Maths-specific DB audit:
+
+```bash
+python main.py --mode db-math
+```
+
+Maths migration preview:
+
+```bash
+python main.py --mode db-math-migration-check
+```
+
 Use a different environment variable name if needed:
 
 ```bash
@@ -158,6 +170,17 @@ DB mode is inspection only:
 - it does not alter schema
 - it does not insert, update, or delete rows
 - it fails safely if the configured DB environment variable is missing
+
+### GitHub Actions DB Audit
+
+The GitHub Actions workflow supports choosing the audit mode at dispatch time.
+
+Recommended maths sequence:
+
+1. Run `db-math`
+2. Review table existence, columns, and sample rows
+3. Run `db-math-migration-check`
+4. Use those results to draft additive migration SQL
 
 ## Config Schema
 
