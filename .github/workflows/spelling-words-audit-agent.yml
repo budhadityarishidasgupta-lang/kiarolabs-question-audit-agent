@@ -22,7 +22,7 @@ jobs:
 
       - name: Run Spelling & Words Audit Agent
         env:
-          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
+          AUDIT_DB_URL: ${{ secrets.AUDIT_DB_URL }}
         run: |
           echo "Running spelling and words DB audit..."
           python main.py --mode db

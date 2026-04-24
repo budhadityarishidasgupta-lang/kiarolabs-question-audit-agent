@@ -22,7 +22,7 @@ jobs:
 
       - name: Run Maths Audit Agent
         env:
-          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
+          AUDIT_DB_URL: ${{ secrets.AUDIT_DB_URL }}
         run: |
           echo "Running maths DB audit..."
           python main.py --mode db-math

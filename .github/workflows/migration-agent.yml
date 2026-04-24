@@ -31,7 +31,7 @@ jobs:
 
       - name: Run Migration Agent
         env:
-          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
+          AUDIT_DB_URL: ${{ secrets.AUDIT_DB_URL }}
         run: |
           echo "Running migration preview mode: ${{ github.event.inputs.mode }}"
           python main.py --mode ${{ github.event.inputs.mode }}
