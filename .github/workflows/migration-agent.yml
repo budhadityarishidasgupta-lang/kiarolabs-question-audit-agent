@@ -1,0 +1,42 @@
+name: Migration Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Migration preview mode to run"
+        required: true
+        default: "db-math-migration-check"
+        type: choice
+        options:
+          - db-migration-check
+          - db-math-migration-check
+
+jobs:
+  run-migration-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install psycopg2-binary python-dotenv
+
+      - name: Run Migration Agent
+        env:
+          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
+        run: |
+          echo "Running migration preview mode: ${{ github.event.inputs.mode }}"
+          python main.py --mode ${{ github.event.inputs.mode }}
+
+      - name: Upload migration result (optional)
+        if: always()
+        run: |
+          echo "Migration preview completed"

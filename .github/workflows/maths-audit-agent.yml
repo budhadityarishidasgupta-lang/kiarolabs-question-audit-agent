@@ -1,0 +1,33 @@
+name: Maths Audit Agent
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install psycopg2-binary python-dotenv
+
+      - name: Run Maths Audit Agent
+        env:
+          DATABASE_URL: ${{ secrets.AUDIT_DB_URL }}
+        run: |
+          echo "Running maths DB audit..."
+          python main.py --mode db-math
+
+      - name: Upload audit result (optional)
+        if: always()
+        run: |
+          echo "Maths audit completed"
