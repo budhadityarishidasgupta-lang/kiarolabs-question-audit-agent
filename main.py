@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 from pathlib import Path
 
 from src.audit_agent.reporting import should_fail
@@ -9,10 +11,45 @@ from src.audit_agent.runner import AuditRunner
 
 
 def parse_args() -> argparse.Namespace:
+    if len(sys.argv) > 1 and sys.argv[1] == "parse-vr":
+        parser = argparse.ArgumentParser(description="Parse one GL-style verbal reasoning PDF into draft CSV outputs.")
+        parser.add_argument("command", choices=["parse-vr"])
+        parser.add_argument("--pdf", required=True, help="Path to the input PDF file.")
+        parser.add_argument("--paper-code", required=True, help="Paper code such as VR-P1.")
+        parser.add_argument("--output-dir", default="exports", help="Directory to write draft CSV outputs.")
+        return parser.parse_args()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "parse-vr-batch":
+        parser = argparse.ArgumentParser(description="Parse all GL-style verbal reasoning PDFs in a directory.")
+        parser.add_argument("command", choices=["parse-vr-batch"])
+        parser.add_argument("--input-dir", required=True, help="Directory containing Verbal Reasoning_P*.pdf files.")
+        parser.add_argument("--output-dir", default="exports", help="Directory to write draft CSV outputs.")
+        return parser.parse_args()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "review-vr":
+        parser = argparse.ArgumentParser(description="Review an existing VR draft CSV and regenerate summary reports.")
+        parser.add_argument("command", choices=["review-vr"])
+        parser.add_argument("--csv", required=True, help="Path to the draft CSV.")
+        return parser.parse_args()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "extract-blocks":
+        parser = argparse.ArgumentParser(description="Extract layout-aware blocks from a verbal reasoning PDF.")
+        parser.add_argument("command", choices=["extract-blocks"])
+        parser.add_argument("--pdf", required=True, help="Path to the input PDF file.")
+        parser.add_argument("--output", default="blocks.json", help="Path to write blocks.json.")
+        return parser.parse_args()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "parse-sections":
+        parser = argparse.ArgumentParser(description="Parse section-specific draft rows from VR blocks.json.")
+        parser.add_argument("command", choices=["parse-sections"])
+        parser.add_argument("--blocks", required=True, help="Path to the input blocks.json file.")
+        parser.add_argument("--output", default="draft.csv", help="Path to write the draft CSV.")
+        return parser.parse_args()
+
     parser = argparse.ArgumentParser(description="Run the question accuracy audit agent.")
     parser.add_argument(
         "--mode",
-        choices=["local", "github", "db", "db-migration-check", "db-math", "db-math-migration-check", "migrate"],
+        choices=["local", "github", "db", "db-migration-check", "db-math", "db-math-migration-check", "migrate", "vr-printable"],
         required=True,
     )
     parser.add_argument(
@@ -34,6 +71,16 @@ def parse_args() -> argparse.Namespace:
         "--db-env-var",
         default="AUDIT_DB_URL",
         help="Environment variable that contains the Postgres connection string for DB audit mode.",
+    )
+    parser.add_argument(
+        "--input-dir",
+        default=".",
+        help="Input directory for vr-printable mode.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="reports/vr-printable",
+        help="Output directory for vr-printable mode.",
     )
     return parser.parse_args()
 
@@ -86,6 +133,74 @@ def run_safe_migration(cursor):
 
 def main() -> int:
     args = parse_args()
+    if getattr(args, "command", None) == "parse-vr":
+        try:
+            from src.audit_agent.vr_parser_v2 import run_parse_vr
+
+            payload = run_parse_vr(
+                pdf_path=Path(args.pdf).resolve(),
+                paper_code=args.paper_code,
+                output_dir=Path(args.output_dir).resolve(),
+            )
+            print(json.dumps(payload, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
+    if getattr(args, "command", None) == "parse-vr-batch":
+        try:
+            from src.audit_agent.vr_parser_v2 import run_parse_vr_batch
+
+            payload = run_parse_vr_batch(
+                input_dir=Path(args.input_dir).resolve(),
+                output_dir=Path(args.output_dir).resolve(),
+            )
+            print(json.dumps(payload, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
+    if getattr(args, "command", None) == "review-vr":
+        try:
+            from src.audit_agent.vr_parser_v2 import run_review_vr
+
+            payload = run_review_vr(csv_path=Path(args.csv).resolve())
+            print(json.dumps(payload, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
+    if getattr(args, "command", None) == "extract-blocks":
+        try:
+            from src.audit_agent.vr_block_extractor import write_blocks_json
+
+            payload = write_blocks_json(
+                pdf_path=Path(args.pdf).resolve(),
+                output_path=Path(args.output).resolve(),
+            )
+            print(json.dumps({"output": str(Path(args.output).resolve()), "blocks": len(payload["blocks"])}, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
+    if getattr(args, "command", None) == "parse-sections":
+        try:
+            from src.audit_agent.vr_section_parser import write_draft_csv
+
+            payload = write_draft_csv(
+                blocks_path=Path(args.blocks).resolve(),
+                output_path=Path(args.output).resolve(),
+            )
+            print(json.dumps(payload, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
     if args.mode == "migrate":
         try:
             import psycopg2
@@ -122,6 +237,20 @@ def main() -> int:
             else:
                 results = runner.run_math_migration_check()
             print(results)
+            return 0
+        except Exception as exc:
+            print(f"Audit failed: {exc}")
+            return 1
+
+    if args.mode == "vr-printable":
+        try:
+            from src.audit_agent.vr_printable_agent import write_vr_outputs
+
+            manifest = write_vr_outputs(
+                input_dir=Path(args.input_dir).resolve(),
+                output_dir=Path(args.output_dir).resolve(),
+            )
+            print(json.dumps(manifest, indent=2))
             return 0
         except Exception as exc:
             print(f"Audit failed: {exc}")
