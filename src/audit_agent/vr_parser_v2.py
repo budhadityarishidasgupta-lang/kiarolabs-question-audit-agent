@@ -10,12 +10,18 @@ from src.audit_agent.vr_block_extractor_v2 import extract_blocks_from_pdf_v2
 
 
 QUESTION_NUMBER_RE = re.compile(r"^\s*(\d(?:\s*\d)?)\s*[.)]?\s+")
+QUESTION_NUMBER_ANYWHERE_RE = re.compile(r"(?m)^\s*(\d(?:\s*\d)?)\s*[.)]?\s+")
 INSTRUCTION_WORDS_RE = re.compile(
-    r"\b(in these questions|in these sentences|read the following information|the alphabet is here to help you|these questions contain|example|answer)\b",
+    r"\b(in these questions|in these sentences|read the following information|the alphabet is here to help you|these questions contain|example|example answer)\b",
     re.IGNORECASE,
 )
 OCR_NOISE_RE = re.compile(r"[ÂÃ�]|[\"']{4,}|[|]{2,}|[?]{2,}")
 OPTION_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])([ABCDE]|[XYZ])(?=\s)")
+STANDARD_OPTION_PATTERN = re.compile(r"([A-E])\s+(.+?)(?=\s+[A-E]\s|$)")
+DUAL_OPTION_PATTERN = re.compile(r"([XYZ])\s+(.+?)(?=\s+[XYZ]\s|$)")
+LEADING_SYMBOLS_RE = re.compile(r"^[\'\",|`.\-:;]+")
+SPACE_JOINED_DIGITS_RE = re.compile(r"\b(\d)\s+(\d)\b")
+HEADER_LINE_RE = re.compile(r"^(If A =|In these questions|Read the following)", re.IGNORECASE)
 
 
 SINGLE_CHOICE_SECTIONS = {
@@ -92,6 +98,7 @@ def _normalize_text(text: str) -> str:
 def _normalize_question_number(token: str | None) -> str:
     if not token:
         return ""
+    token = SPACE_JOINED_DIGITS_RE.sub(r"\1\2", token)
     return re.sub(r"\s+", "", token)
 
 
@@ -113,6 +120,36 @@ def _looks_like_option_block(text: str) -> bool:
     if re.match(r"^\s*[XYZ]\b", normalized):
         return True
     return False
+
+
+def _clean_line(line: str) -> str:
+    cleaned = _normalize_text(LEADING_SYMBOLS_RE.sub("", line or "").strip())
+    cleaned = re.sub(r"^[A-Za-z]\s+", "", cleaned) if re.match(r"^[A-Za-z]\s+[A-Za-z]{3,}", cleaned) else cleaned
+    if cleaned.startswith("Posters were") and "Posters were stuck" not in cleaned:
+        cleaned = ""
+    return cleaned
+
+
+def _is_meaningful_line(line: str) -> bool:
+    normalized = _normalize_text(line)
+    if not normalized:
+        return False
+    if re.search(r"[A-Za-z]", normalized) is None and OPTION_LABEL_RE.search(normalized) is None:
+        return False
+    valid_words = re.findall(r"\b[A-Za-z]{2,}\b", normalized)
+    if len(valid_words) < 3 and OPTION_LABEL_RE.search(normalized) is None:
+        return False
+    return True
+
+
+def _preclean_lines(text: str) -> list[str]:
+    cleaned_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        cleaned = _clean_line(raw_line)
+        if not _is_meaningful_line(cleaned):
+            continue
+        cleaned_lines.append(_normalize_text(cleaned))
+    return cleaned_lines
 
 
 def _assemble_question_groups(blocks: list[dict]) -> list[tuple[dict, list[dict]]]:
@@ -164,13 +201,41 @@ def _extract_question_text_and_option_text(lines: list[str]) -> tuple[str, list[
     return _normalize_text(" ".join(question_lines)), option_lines
 
 
+def _extract_labeled_options(option_text: str, labels: list[str], pattern: re.Pattern[str]) -> dict[str, str]:
+    values = {label: "" for label in labels}
+    matches = list(pattern.finditer(option_text))
+    for match in matches:
+        label = match.group(1).upper()
+        value = _normalize_text(match.group(2)).strip(" .,:;")
+        values[label] = value
+    return values
+
+
 def _extract_option_values(option_text: str, allowed_labels: list[str]) -> dict[str, str]:
     values = {label: "" for label in ["A", "B", "C", "D", "E", "X", "Y", "Z"]}
     if not option_text:
         return values
 
+    normalized_text = _normalize_text(option_text)
+    anchor_labels = [label for label in allowed_labels if label in {"A", "B", "C", "D", "E"}]
+    if anchor_labels:
+        anchored = _extract_labeled_options(normalized_text, anchor_labels, STANDARD_OPTION_PATTERN)
+        for label, value in anchored.items():
+            if value:
+                values[label] = value
+
+    dual_labels = [label for label in allowed_labels if label in {"X", "Y", "Z"}]
+    if dual_labels:
+        anchored = _extract_labeled_options(normalized_text, dual_labels, DUAL_OPTION_PATTERN)
+        for label, value in anchored.items():
+            if value:
+                values[label] = value
+
+    if any(values[label] for label in allowed_labels):
+        return values
+
     lines = _split_lines(option_text)
-    pattern = re.compile(rf"(?<![A-Za-z0-9])({'|'.join(allowed_labels)})(?=\s)", re.IGNORECASE)
+    pattern = re.compile(rf"(?<![A-Za-z0-9])({'|'.join(allowed_labels)})(?=\s)")
 
     for line in lines:
         tokens = [token for token in re.split(r"\s+", line) if token]
@@ -198,6 +263,13 @@ def _extract_option_values(option_text: str, allowed_labels: list[str]) -> dict[
             if chunk and not values[label]:
                 values[label] = chunk
     return values
+
+
+def _option_contains_nested_label(value: str, labels: list[str]) -> bool:
+    if not value:
+        return False
+    nested = re.search(rf"(?<![A-Za-z0-9])({'|'.join(labels)})(?=\s)", value)
+    return nested is not None
 
 
 def _validate_row(
@@ -236,7 +308,15 @@ def _validate_row(
         reasons.append("options_format_incomplete")
         confidence -= 0.2
 
-    question_count = len(re.findall(r"(?m)^\s*\d(?:\s*\d)?\s*[.)]?\s+", raw_text))
+    if any(_option_contains_nested_label(options.get(label, ""), expected_labels) for label in expected_labels):
+        reasons.append("option_parsing_failed")
+        confidence -= 0.3
+
+    if any(len(re.findall(r"\b\w+\b", options.get(label, ""))) > 10 for label in expected_labels if options.get(label, "").strip()):
+        reasons.append("option_parsing_failed")
+        confidence -= 0.25
+
+    question_count = len(QUESTION_NUMBER_ANYWHERE_RE.findall(raw_text))
     if question_count > 1:
         reasons.append("multiple_question_numbers_in_row")
         confidence -= 0.25
@@ -244,6 +324,24 @@ def _validate_row(
     if "Example" in raw_text or "Answer" in raw_text:
         reasons.append("example_or_answer_text_present")
         confidence -= 0.35
+
+    if section_type == "hidden_four_letter_word" and len(actual_non_empty) != 5:
+        reasons.append("option_parsing_failed")
+        confidence -= 0.25
+    if section_type == "letters_as_numbers" and any(
+        options.get(label, "").strip() and len(_normalize_text(options.get(label, ""))) != 1 for label in expected_labels
+    ):
+        reasons.append("option_parsing_failed")
+        confidence -= 0.25
+    if section_type == "move_one_letter" and any(
+        options.get(label, "").strip() and len(_normalize_text(options.get(label, ""))) != 1 for label in expected_labels
+    ):
+        reasons.append("option_parsing_failed")
+        confidence -= 0.25
+    if section_type == "word_analogy_two_groups":
+        if any(not options.get(label, "").strip() for label in ["A", "B", "C", "X", "Y", "Z"]):
+            reasons.append("option_parsing_failed")
+            confidence -= 0.25
 
     confidence = max(0.0, round(confidence, 2))
     needs_review = bool(reasons) or confidence < 0.85
@@ -258,7 +356,7 @@ def _parse_question_group(
     group_blocks: list[dict],
 ) -> VrDraftCsvRow:
     combined_raw = "\n".join(block["raw_text"] for block in group_blocks).strip()
-    combined_lines = _split_lines(combined_raw)
+    combined_lines = _preclean_lines(combined_raw)
 
     if combined_lines:
         first_line = combined_lines[0]
@@ -417,8 +515,10 @@ def run_parse_vr(pdf_path: Path, paper_code: str, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     draft_path = output_dir / "vr_questions_draft.csv"
     review_path = output_dir / "vr_needs_review.csv"
-    _write_csv(draft_path, rows)
-    _write_csv(review_path, [row for row in rows if row.needs_review])
+    exportable_rows = [row for row in rows if not row.needs_review]
+    review_rows = [row for row in rows if row.needs_review]
+    _write_csv(draft_path, exportable_rows)
+    _write_csv(review_path, review_rows)
     report_json, report_md = _write_reports(output_dir, [summary], rows)
     return {
         "draft_csv": str(draft_path),
@@ -426,6 +526,8 @@ def run_parse_vr(pdf_path: Path, paper_code: str, output_dir: Path) -> dict:
         "report_json": str(report_json),
         "report_md": str(report_md),
         "summary": summary,
+        "exported_rows": len(exportable_rows),
+        "review_rows": len(review_rows),
     }
 
 
@@ -442,8 +544,10 @@ def run_parse_vr_batch(input_dir: Path, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     draft_path = output_dir / "vr_questions_draft.csv"
     review_path = output_dir / "vr_needs_review.csv"
-    _write_csv(draft_path, all_rows)
-    _write_csv(review_path, [row for row in all_rows if row.needs_review])
+    exportable_rows = [row for row in all_rows if not row.needs_review]
+    review_rows = [row for row in all_rows if row.needs_review]
+    _write_csv(draft_path, exportable_rows)
+    _write_csv(review_path, review_rows)
     report_json, report_md = _write_reports(output_dir, summaries, all_rows)
     return {
         "draft_csv": str(draft_path),
@@ -452,6 +556,8 @@ def run_parse_vr_batch(input_dir: Path, output_dir: Path) -> dict:
         "report_md": str(report_md),
         "papers": len(summaries),
         "rows": len(all_rows),
+        "exported_rows": len(exportable_rows),
+        "review_rows": len(review_rows),
     }
 
 
