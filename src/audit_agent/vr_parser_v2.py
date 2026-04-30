@@ -17,11 +17,21 @@ INSTRUCTION_WORDS_RE = re.compile(
 )
 OCR_NOISE_RE = re.compile(r"[ÂÃ�]|[\"']{4,}|[|]{2,}|[?]{2,}")
 OPTION_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])([ABCDE]|[XYZ])(?=\s)")
-STANDARD_OPTION_PATTERN = re.compile(r"([A-E])\s+(.+?)(?=\s+[A-E]\s|$)")
-DUAL_OPTION_PATTERN = re.compile(r"([XYZ])\s+(.+?)(?=\s+[XYZ]\s|$)")
+STANDARD_OPTION_PATTERN = re.compile(r"(?:^|\s)([A-E])\s+(.+?)(?=(?:\s+[A-E]\s)|$)")
+DUAL_OPTION_PATTERN = re.compile(r"(?:^|\s)([XYZ])\s+(.+?)(?=(?:\s+[XYZ]\s)|$)")
 LEADING_SYMBOLS_RE = re.compile(r"^[\'\",|`.\-:;]+")
 SPACE_JOINED_DIGITS_RE = re.compile(r"\b(\d)\s+(\d)\b")
 HEADER_LINE_RE = re.compile(r"^(If A =|In these questions|Read the following)", re.IGNORECASE)
+QUESTION_CONTINUATION_HEADER_RE = re.compile(r"^(If A =|The alphabet is here to help you|Read the following|In these questions)", re.IGNORECASE)
+
+PAGE_EXPECTED_QUESTIONS: dict[str, dict[int, list[str]]] = {
+    "VR-P1": {2: ["1", "2"], 3: ["3", "4", "5", "6"], 4: ["7", "8", "9"], 5: ["10", "11", "12", "13"]},
+    "VR-P5": {3: ["7", "8", "9", "10", "11", "12"]},
+    "VR-P6": {2: ["1", "2", "3"]},
+    "VR-P7": {8: ["25", "26"]},
+    "VR-P8": {2: ["1", "2", "3", "4", "5", "6"]},
+    "VR-P9": {2: ["1", "2", "3", "4", "5", "6"]},
+}
 
 
 SINGLE_CHOICE_SECTIONS = {
@@ -124,6 +134,8 @@ def _looks_like_option_block(text: str) -> bool:
 
 def _clean_line(line: str) -> str:
     cleaned = _normalize_text(LEADING_SYMBOLS_RE.sub("", line or "").strip())
+    if re.match(r"^[a-z]\s+[A-Za-z]{3,}\b", cleaned):
+        return ""
     cleaned = re.sub(r"^[A-Za-z]\s+", "", cleaned) if re.match(r"^[A-Za-z]\s+[A-Za-z]{3,}", cleaned) else cleaned
     if cleaned.startswith("Posters were") and "Posters were stuck" not in cleaned:
         cleaned = ""
@@ -150,6 +162,36 @@ def _preclean_lines(text: str) -> list[str]:
             continue
         cleaned_lines.append(_normalize_text(cleaned))
     return cleaned_lines
+
+
+def _make_virtual_block(source_block: dict, lines: list[str], suffix: int) -> dict:
+    block_id = str(source_block.get("block_id", "virtual"))
+    return {
+        **source_block,
+        "block_id": f"{block_id}-s{suffix}",
+        "raw_text": "\n".join(lines).strip(),
+    }
+
+
+def _split_group_blocks_if_needed(group_blocks: list[dict]) -> list[list[dict]]:
+    if not group_blocks:
+        return []
+    line_entries: list[tuple[dict, str]] = []
+    for block in group_blocks:
+        for line in _split_lines(block.get("raw_text", "")):
+            line_entries.append((block, line))
+
+    starts = [index for index, (_, line) in enumerate(line_entries) if QUESTION_NUMBER_RE.match(line)]
+    if len(starts) <= 1:
+        return [group_blocks]
+
+    split_groups: list[list[dict]] = []
+    for split_index, start in enumerate(starts):
+        end = starts[split_index + 1] if split_index + 1 < len(starts) else len(line_entries)
+        chunk_lines = [line for _, line in line_entries[start:end]]
+        base_block = line_entries[start][0]
+        split_groups.append([_make_virtual_block(base_block, chunk_lines, split_index + 1)])
+    return split_groups
 
 
 def _assemble_question_groups(blocks: list[dict]) -> list[tuple[dict, list[dict]]]:
@@ -199,6 +241,26 @@ def _extract_question_text_and_option_text(lines: list[str]) -> tuple[str, list[
             question_lines.append(line)
 
     return _normalize_text(" ".join(question_lines)), option_lines
+
+
+def _merge_multiline_option_lines(option_lines: list[str]) -> str:
+    if not option_lines:
+        return ""
+    merged_parts: list[str] = []
+    for line in option_lines:
+        normalized = _normalize_text(line)
+        if not normalized:
+            continue
+        if merged_parts:
+            previous = merged_parts[-1]
+            if re.search(r"\bA\b.*\bB\b.*\bC\b", previous) and re.match(r"^\s*[DE]\b", normalized):
+                merged_parts[-1] = f"{previous} {normalized}"
+                continue
+            if re.search(r"\bA\b.*\bB\b.*\bC\b", previous) and re.match(r"^\s*[XYZ]\b", normalized):
+                merged_parts[-1] = f"{previous} {normalized}"
+                continue
+        merged_parts.append(normalized)
+    return _normalize_text(" ".join(merged_parts))
 
 
 def _extract_labeled_options(option_text: str, labels: list[str], pattern: re.Pattern[str]) -> dict[str, str]:
@@ -342,6 +404,11 @@ def _validate_row(
         if any(not options.get(label, "").strip() for label in ["A", "B", "C", "X", "Y", "Z"]):
             reasons.append("option_parsing_failed")
             confidence -= 0.25
+    if section_type == "number_series" and any(
+        options.get(label, "").strip() and re.search(r"\d", options.get(label, "")) is None for label in expected_labels
+    ):
+        reasons.append("option_parsing_failed")
+        confidence -= 0.25
 
     confidence = max(0.0, round(confidence, 2))
     needs_review = bool(reasons) or confidence < 0.85
@@ -365,7 +432,8 @@ def _parse_question_group(
     question_number = _question_number_from_text(lead_block["raw_text"])
     expected_labels = SECTION_OPTION_LABELS.get(section_type, ["A", "B", "C", "D", "E"])
     question_text, option_lines = _extract_question_text_and_option_text(combined_lines)
-    option_values = _extract_option_values("\n".join(option_lines), expected_labels)
+    merged_option_text = _merge_multiline_option_lines(option_lines)
+    option_values = _extract_option_values(merged_option_text, expected_labels)
     confidence, needs_review, reasons = _validate_row(
         section_type=section_type,
         question_number=question_number,
@@ -406,6 +474,7 @@ def _derive_paper_code(pdf_path: Path) -> str:
 
 
 def parse_vr_pdf(pdf_path: Path, paper_code: str | None = None) -> tuple[list[VrDraftCsvRow], dict]:
+    effective_paper_code = paper_code or _derive_paper_code(pdf_path)
     blocks = [asdict(block) for block in extract_blocks_from_pdf_v2(pdf_path)]
     active = ActiveSection()
     candidate_blocks: list[dict] = []
@@ -439,18 +508,34 @@ def parse_vr_pdf(pdf_path: Path, paper_code: str | None = None) -> tuple[list[Vr
         if lead_block["page_number"] == 1:
             continue
         section_type = str(lead_block.get("section_type", "unknown") or "unknown")
-        rows.append(
-            _parse_question_group(
-                paper_code=paper_code or _derive_paper_code(pdf_path),
-                section_type=section_type,
-                lead_block=lead_block,
-                group_blocks=group_blocks,
+        for split_group in _split_group_blocks_if_needed(group_blocks):
+            split_lead = split_group[0]
+            rows.append(
+                _parse_question_group(
+                    paper_code=effective_paper_code,
+                    section_type=section_type,
+                    lead_block=split_lead,
+                    group_blocks=split_group,
+                )
             )
-        )
+
+    expected_page_map = PAGE_EXPECTED_QUESTIONS.get(effective_paper_code, {})
+    if expected_page_map:
+        for page_number, expected_questions in expected_page_map.items():
+            page_rows = [row for row in rows if row.page_number == page_number]
+            actual_questions = [row.question_number for row in page_rows]
+            if actual_questions != expected_questions:
+                for row in page_rows:
+                    reasons = [item.strip() for item in row.review_reason.split(";") if item.strip()]
+                    if "page_validation_failed" not in reasons:
+                        reasons.append("page_validation_failed")
+                    row.review_reason = "; ".join(reasons)
+                    row.needs_review = True
+                    row.confidence = min(row.confidence, 0.8)
 
     rows.sort(key=lambda row: (row.page_number, int(row.question_number or "999"), row.section_type))
     summary = {
-        "paper_code": paper_code or _derive_paper_code(pdf_path),
+        "paper_code": effective_paper_code,
         "pdf": str(pdf_path),
         "blocks": len(blocks),
         "rows": len(rows),
